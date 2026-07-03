@@ -1,0 +1,6 @@
+{
+  "name": "Liquidación de Haberes",
+  "description": "Procesador y validador inteligente de liquidación de haberes de agentes a partir de PDFs de recibos y TOTREP, con exportador a Excel profesional.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
