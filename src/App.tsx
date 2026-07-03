@@ -202,7 +202,8 @@ export default function App() {
     
     // 1. Filter
     const filtered = result.employees.filter(emp => 
-      emp.name.toLowerCase().includes(searchTerm.toLowerCase())
+      emp.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (emp.idHr && emp.idHr.includes(searchTerm))
     );
 
     // 2. Sort
@@ -215,7 +216,13 @@ export default function App() {
         valB = b.name;
         return sortDirection === 'asc' 
           ? valA.localeCompare(valB) 
-          : valB.localeCompare(a.name);
+          : valB.localeCompare(valA);
+      } else if (sortField === 'idHr') {
+        valA = a.idHr || '';
+        valB = b.idHr || '';
+        return sortDirection === 'asc'
+          ? valA.localeCompare(valB)
+          : valB.localeCompare(valA);
       } else if (sortField === 'liquido') {
         valA = a.liquido;
         valB = b.liquido;
@@ -240,14 +247,14 @@ export default function App() {
     const rows: any[][] = [];
     
     // Header Row 1: Merged Categories
-    const h1 = ['Información de Empleado'];
+    const h1 = ['Id. Hr', 'Información de Empleado'];
     dvKeys.forEach((_, idx) => h1.push(idx === 0 ? 'HABERES / DEVENGADOS (DV)' : ''));
     rtK.forEach((_, idx) => h1.push(idx === 0 ? 'DESCUENTOS / RETENCIONES (RT)' : ''));
     h1.push(''); // Liquido column
     rows.push(h1);
 
     // Header Row 2: Concept names
-    const h2 = ['Apellido y Nombre'];
+    const h2 = ['Id. Hr', 'Apellido y Nombre'];
     dvKeys.forEach(k => h2.push(conceptsMap[k]?.name || k));
     rtK.forEach(k => h2.push(conceptsMap[k]?.name || k));
     h2.push('Líquido a Pagar');
@@ -255,7 +262,7 @@ export default function App() {
 
     // Data rows
     for (const emp of employees) {
-      const row: any[] = [emp.name];
+      const row: any[] = [emp.idHr || '', emp.name];
       dvKeys.forEach(k => row.push(emp.concepts[k]?.value || null));
       rtK.forEach(k => row.push(emp.concepts[k]?.value || null));
       row.push(emp.liquido || null);
@@ -263,7 +270,7 @@ export default function App() {
     }
 
     // Totals row
-    const totRow = ['TOTALES'];
+    const totRow = ['', 'TOTALES'];
     dvKeys.forEach(k => {
       const tot = employees.reduce((s, e) => s + (e.concepts[k]?.value || 0), 0);
       totRow.push(tot || null);
@@ -279,14 +286,17 @@ export default function App() {
     const ws1 = XLSX.utils.aoa_to_sheet(rows);
     
     // Set auto widths
-    const colWidths = [{ wch: 32 }]; // Name column
+    const colWidths = [
+      { wch: 15 }, // Id. Hr column
+      { wch: 32 }  // Name column
+    ];
     [...dvKeys, ...rtK].forEach(() => colWidths.push({ wch: 18 }));
     colWidths.push({ wch: 22 }); // Liquido column
     ws1['!cols'] = colWidths;
 
     // Apply currency formatting to numeric columns
     for (let r = 2; r < rows.length; r++) {
-      for (let c = 1; c < rows[r].length; c++) {
+      for (let c = 2; c < rows[r].length; c++) {
         const ref = XLSX.utils.encode_cell({ r, c });
         if (ws1[ref] && ws1[ref].v !== null && ws1[ref].v !== undefined) {
           ws1[ref].z = '#,##0.00';
@@ -349,9 +359,67 @@ export default function App() {
       }
     }
 
+    // Sheet 3: Consolidated Summary per Employee
+    const summaryRows: any[][] = [
+      ['RESUMEN CONSOLIDADO POR EMPLEADO'],
+      [],
+      ['Id. Hr', 'Apellido y Nombre', 'Rem. c/ Aporte', 'Rem. s/ Aporte (restado S.F.)', 'Salario Familiar', 'Descuentos', 'Líquido a Pagar']
+    ];
+
+    for (const emp of employees) {
+      summaryRows.push([
+        emp.idHr || '',
+        emp.name,
+        emp.remCAporte || 0,
+        Math.max(0, (emp.remSAporte || 0) - (emp.salarioFamiliar || 0)),
+        emp.salarioFamiliar || 0,
+        emp.totalDescuentos || 0,
+        emp.liquido || 0
+      ]);
+    }
+
+    // Totals row for Sheet 3
+    const totalRemCAporte = employees.reduce((s, e) => s + (e.remCAporte || 0), 0);
+    const totalRemSAporteRestado = employees.reduce((s, e) => s + Math.max(0, (e.remSAporte || 0) - (e.salarioFamiliar || 0)), 0);
+    const totalSalarioFamiliar = employees.reduce((s, e) => s + (e.salarioFamiliar || 0), 0);
+    const totalDescuentos = employees.reduce((s, e) => s + (e.totalDescuentos || 0), 0);
+    const totalLiquido = employees.reduce((s, e) => s + (e.liquido || 0), 0);
+
+    summaryRows.push([
+      '',
+      'TOTALES',
+      totalRemCAporte,
+      totalRemSAporteRestado,
+      totalSalarioFamiliar,
+      totalDescuentos,
+      totalLiquido
+    ]);
+
+    const ws3 = XLSX.utils.aoa_to_sheet(summaryRows);
+    ws3['!cols'] = [
+      { wch: 15 }, // Id. Hr
+      { wch: 32 }, // Name
+      { wch: 20 }, // Rem con aporte
+      { wch: 28 }, // Rem sin aporte (restado S.F.)
+      { wch: 20 }, // Salario familiar
+      { wch: 18 }, // Descuentos
+      { wch: 22 }  // Liquido
+    ];
+
+    // Format numbers in sheet 3
+    for (let r = 3; r < summaryRows.length; r++) {
+      for (const colIdx of [2, 3, 4, 5, 6]) {
+        const ref = XLSX.utils.encode_cell({ r, c: colIdx });
+        if (ws3[ref] && ws3[ref].v !== null && ws3[ref].v !== undefined) {
+          ws3[ref].z = '#,##0.00';
+        }
+      }
+    }
+
     // Build workbook
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws1, 'Matriz de Liquidación');
+    XLSX.utils.book_append_sheet(wb, ws3, 'Resumen Consolidado');
     XLSX.utils.book_append_sheet(wb, ws2, 'Conciliación de Totales');
 
     // Generate output file
@@ -755,7 +823,10 @@ export default function App() {
                       <thead className="sticky top-0 z-20">
                         {/* Header Row 1: High level groups */}
                         <tr className="bg-[#090d19] border-b border-slate-800 text-[10px] text-slate-400 font-semibold tracking-wider text-center">
-                          <th className="sticky left-0 bg-[#090d19] z-30 text-left border-r border-slate-800 px-4 py-2.5 min-w-[220px]">
+                          <th className="sticky left-0 bg-[#090d19] z-30 text-left border-r border-slate-800 px-4 py-2.5 min-w-[100px]">
+                            ID. HR
+                          </th>
+                          <th className="sticky left-[100px] bg-[#090d19] z-30 text-left border-r border-slate-800 px-4 py-2.5 min-w-[220px]">
                             EMPLEADO
                           </th>
                           <th 
@@ -778,8 +849,15 @@ export default function App() {
                         {/* Header Row 2: Sub columns / concept names */}
                         <tr className="bg-[#12182c] border-b border-slate-800 text-slate-350">
                           <th 
+                            onClick={() => handleSort('idHr')}
+                            className="sticky left-0 bg-[#12182c] z-30 text-left border-r border-slate-800 px-4 py-3 min-w-[100px] font-semibold text-white cursor-pointer hover:bg-slate-850 flex items-center justify-between"
+                          >
+                            <span>Id. Hr</span>
+                            <ArrowUpDown className="h-3 w-3 text-slate-500" />
+                          </th>
+                          <th 
                             onClick={() => handleSort('name')}
-                            className="sticky left-0 bg-[#12182c] z-30 text-left border-r border-slate-800 px-4 py-3 min-w-[220px] font-semibold text-white cursor-pointer hover:bg-slate-850 flex items-center justify-between"
+                            className="sticky left-[100px] bg-[#12182c] z-30 text-left border-r border-slate-800 px-4 py-3 min-w-[220px] font-semibold text-white cursor-pointer hover:bg-slate-850 flex items-center justify-between"
                           >
                             <span>Apellido y Nombre</span>
                             <ArrowUpDown className="h-3 w-3 text-slate-500" />
@@ -829,9 +907,16 @@ export default function App() {
                       <tbody className="divide-y divide-slate-800/40">
                         {filteredAndSortedEmployees.map((emp) => (
                           <tr key={emp.name} className="hover:bg-indigo-950/20 transition-all">
+                            {/* Id. Hr sticky */}
+                            <td 
+                              className="sticky left-0 bg-[#0c1020] border-r border-slate-800 px-4 py-2 text-left font-mono text-slate-400 whitespace-nowrap min-w-[100px] truncate"
+                              title={emp.idHr}
+                            >
+                              {emp.idHr || '-'}
+                            </td>
                             {/* Employee name sticky */}
                             <td 
-                              className="sticky left-0 bg-[#0c1020] border-r border-slate-800 px-4 py-2 text-left font-semibold text-white whitespace-nowrap min-w-[220px] truncate" 
+                              className="sticky left-[100px] bg-[#0c1020] border-r border-slate-800 px-4 py-2 text-left font-semibold text-white whitespace-nowrap min-w-[220px] truncate" 
                               title={emp.name}
                             >
                               {emp.name}
@@ -868,7 +953,10 @@ export default function App() {
                       {/* Grand Totals Row */}
                       <tfoot className="border-t-2 border-slate-800">
                         <tr className="bg-[#0b1022] font-bold text-white text-right">
-                          <td className="sticky left-0 bg-[#0b1022] border-r border-slate-800 px-4 py-3 text-left font-bold text-indigo-400">
+                          <td className="sticky left-0 bg-[#0b1022] border-r border-slate-800 px-4 py-3 text-left font-mono text-slate-500">
+                            -
+                          </td>
+                          <td className="sticky left-[100px] bg-[#0b1022] border-r border-slate-800 px-4 py-3 text-left font-bold text-indigo-400">
                             TOTALES
                           </td>
 
@@ -896,6 +984,93 @@ export default function App() {
                         </tr>
                       </tfoot>
                     </table>
+                  </div>
+                </div>
+
+                {/* Consolidated Summary Table Section */}
+                <div className="mt-8 rounded-xl border border-slate-800 bg-[#0a0d18] overflow-hidden p-6 space-y-4">
+                  <div>
+                    <h3 className="text-base font-bold text-white flex items-center gap-2">
+                      <FileSpreadsheet className="h-5 w-5 text-emerald-400" />
+                      Resumen Consolidado de Conceptos Críticos por Agente
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-1 leading-normal">
+                      Vista simplificada con las métricas de haberes previsionales, no previsionales (excluyendo salario familiar), asignaciones familiares, deducciones totales y haberes netos a cobrar.
+                    </p>
+                  </div>
+
+                  <div className="border border-slate-800 rounded-xl overflow-hidden bg-[#0c1020]">
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse font-mono text-[11px] text-right">
+                        <thead>
+                          <tr className="bg-[#12182c] border-b border-slate-800 text-slate-300 font-semibold">
+                            <th className="text-left px-4 py-3 min-w-[100px] border-r border-slate-800">Id. Hr</th>
+                            <th className="text-left px-4 py-3 min-w-[220px] border-r border-slate-800">Apellido y Nombre</th>
+                            <th className="px-4 py-3 border-r border-slate-800">Rem. c/ Aporte</th>
+                            <th className="px-4 py-3 border-r border-slate-800">Rem. s/ Aporte (restado S.F.)</th>
+                            <th className="px-4 py-3 border-r border-slate-800">Salario Familiar</th>
+                            <th className="px-4 py-3 border-r border-slate-800">Descuentos</th>
+                            <th className="px-4 py-3 text-emerald-400">Líquido a Pagar</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/40">
+                          {filteredAndSortedEmployees.map((emp) => {
+                            const remCAporte = emp.remCAporte || 0;
+                            const salarioFam = emp.salarioFamiliar || 0;
+                            const remSAporteRestado = Math.max(0, (emp.remSAporte || 0) - salarioFam);
+                            const descuentos = emp.totalDescuentos || 0;
+                            const liquido = emp.liquido || 0;
+
+                            return (
+                              <tr key={`sum-${emp.name}`} className="hover:bg-indigo-950/20 transition-all">
+                                <td className="text-left px-4 py-2 border-r border-slate-800 text-slate-400 font-mono">
+                                  {emp.idHr || '-'}
+                                </td>
+                                <td className="text-left px-4 py-2 border-r border-slate-800 font-semibold text-white whitespace-nowrap truncate max-w-[240px]" title={emp.name}>
+                                  {emp.name}
+                                </td>
+                                <td className="px-4 py-2 border-r border-slate-800/30 text-indigo-300">
+                                  {remCAporte > 0 ? remCAporte.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-'}
+                                </td>
+                                <td className="px-4 py-2 border-r border-slate-800/30 text-sky-300">
+                                  {remSAporteRestado > 0 ? remSAporteRestado.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-'}
+                                </td>
+                                <td className="px-4 py-2 border-r border-slate-800/30 text-amber-300/90">
+                                  {salarioFam > 0 ? salarioFam.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-'}
+                                </td>
+                                <td className="px-4 py-2 border-r border-slate-800/30 text-rose-300/90">
+                                  {descuentos > 0 ? descuentos.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-'}
+                                </td>
+                                <td className="px-4 py-2 font-bold text-emerald-400 bg-emerald-950/5">
+                                  ${liquido.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                        <tfoot className="border-t-2 border-slate-800">
+                          <tr className="bg-[#0b1022] font-bold text-white text-right">
+                            <td className="text-left px-4 py-3 border-r border-slate-800">-</td>
+                            <td className="text-left px-4 py-3 border-r border-slate-800 text-indigo-400 font-bold">TOTALES</td>
+                            <td className="px-4 py-3 border-r border-slate-800/50 text-indigo-400">
+                              {filteredAndSortedEmployees.reduce((s, e) => s + (e.remCAporte || 0), 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </td>
+                            <td className="px-4 py-3 border-r border-slate-800/50 text-sky-400">
+                              {filteredAndSortedEmployees.reduce((s, e) => s + Math.max(0, (e.remSAporte || 0) - (e.salarioFamiliar || 0)), 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </td>
+                            <td className="px-4 py-3 border-r border-slate-800/50 text-amber-400">
+                              {filteredAndSortedEmployees.reduce((s, e) => s + (e.salarioFamiliar || 0), 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </td>
+                            <td className="px-4 py-3 border-r border-slate-800/50 text-rose-400">
+                              {filteredAndSortedEmployees.reduce((s, e) => s + (e.totalDescuentos || 0), 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </td>
+                            <td className="px-4 py-3 font-extrabold text-emerald-400 bg-[#0d162c]">
+                              ${filteredAndSortedEmployees.reduce((s, e) => s + e.liquido, 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
                   </div>
                 </div>
               </div>

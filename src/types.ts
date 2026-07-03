@@ -6,9 +6,14 @@ export interface ConceptValue {
 }
 
 export interface EmployeeStub {
+  idHr: string;
   name: string;
   concepts: Record<string, ConceptValue>;
   liquido: number;
+  remCAporte: number;
+  remSAporte: number;
+  salarioFamiliar: number;
+  totalDescuentos: number;
 }
 
 export interface ParsingLog {

@@ -1,8 +1,10 @@
 import * as pdfjs from 'pdfjs-dist';
+// @ts-ignore
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { EmployeeStub, ConceptValue, ComparisonResult, ProcessingResult } from '../types';
 
-// Set PDF.js worker URL to a reliable CDN that matches the installed library version
-pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
+// Use the bundled local worker via Vite's ?url import which resolves correctly in dev and prod
+pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 /**
  * Parses Spanish/Argentine format numbers to numeric floats.
@@ -105,9 +107,9 @@ export async function extractPdfLines(
 export function parseEmployeeReceipts(lines: string[], logFn: (msg: string, type: 'info' | 'success' | 'warning' | 'error') => void): EmployeeStub[] {
   const stubs: EmployeeStub[] = [];
   let currentStub: EmployeeStub | null = null;
-  let expectLiq = false;
+  let hasLiquidoForCurrentStub = false;
 
-  for (let idx = 0; rowIdx < lines.length; idx++) {
+  for (let idx = 0; idx < lines.length; idx++) {
     const line = lines[idx];
     if (!line) continue;
     const trimmed = line.trim();
@@ -118,6 +120,7 @@ export function parseEmployeeReceipts(lines: string[], logFn: (msg: string, type
     const fallbackMatch = trimmed.match(/Apellido\s+y\s+Nombre\s*:\s*([A-ZÁÉÍÓÚÜÑÀ\s,.\-]+?)(?:\s{2,}|\s+Centro|\s+Cargo|\s+Fecha|\s+$)/i);
     
     const nameMatch = hrMatch ? hrMatch[2] : (fallbackMatch ? fallbackMatch[1] : null);
+    const idHr = hrMatch ? hrMatch[1].trim() : "";
 
     if (nameMatch) {
       if (currentStub) {
@@ -126,36 +129,44 @@ export function parseEmployeeReceipts(lines: string[], logFn: (msg: string, type
       
       const cleanName = nameMatch.trim().replace(/\s+/g, ' ');
       currentStub = {
+        idHr: idHr,
         name: cleanName,
         concepts: {},
-        liquido: 0
+        liquido: 0,
+        remCAporte: 0,
+        remSAporte: 0,
+        salarioFamiliar: 0,
+        totalDescuentos: 0
       };
-      expectLiq = true;
+      hasLiquidoForCurrentStub = false;
       continue;
     }
 
     if (!currentStub) continue;
 
-    // Scan for Liquido net pay
-    // Standard format: single line with net value right after headers
-    if (expectLiq) {
-      const liqSolo = trimmed.match(/^([\d\.]+,\d{2})$/);
-      if (liqSolo) {
-        currentStub.liquido += es2f(liqSolo[1]);
-        expectLiq = false;
+    // Scan for high-level summaries: Rem c/ Aporte, Rem s/ Aporte, Salario Familiar
+    const remCAporteMatch = trimmed.match(/Rem\s*(?:\.|uneraci[oó]n)?\s*c\/?\s*Aporte:?\s*([\d\.]+,\d{2})/i);
+    if (remCAporteMatch) {
+      currentStub.remCAporte = es2f(remCAporteMatch[1]);
+    }
+
+    const remSAporteMatch = trimmed.match(/Rem\s*(?:\.|uneraci[oó]n)?\s*s\/?\s*Aporte:?\s*([\d\.]+,\d{2})/i);
+    if (remSAporteMatch) {
+      currentStub.remSAporte = es2f(remSAporteMatch[1]);
+    }
+
+    const salarioFamiliarMatch = trimmed.match(/Salario\s+Familiar:?\s*([\d\.]+,\d{2})/i) || trimmed.match(/Sal_?\s*Fam(?:iliar)?:?\s*([\d\.]+,\d{2})/i);
+    if (salarioFamiliarMatch) {
+      currentStub.salarioFamiliar = es2f(salarioFamiliarMatch[1]);
+    }
+
+    // Scan for Liquido net pay (only once per stub to avoid double counting)
+    if (!hasLiquidoForCurrentStub) {
+      const liqMatch = trimmed.match(/Liquido\s+([\d\.]+,\d{2})/i) || trimmed.match(/Liq\.\s*Pesos:\s*([\d\.]+,\d{2})/i);
+      if (liqMatch) {
+        currentStub.liquido = es2f(liqMatch[1]);
+        hasLiquidoForCurrentStub = true;
         continue;
-      }
-      
-      // Fallback within line content
-      const liqLine = trimmed.match(/Liquido\s+([\d\.]+,\d{2})/i) || trimmed.match(/Liq\.\s*Pesos:\s*([\d\.]+,\d{2})/i);
-      if (liqLine) {
-        currentStub.liquido += es2f(liqLine[1]);
-        expectLiq = false;
-        continue;
-      }
-      
-      if (!trimmed.startsWith('____')) {
-        expectLiq = false;
       }
     }
 
@@ -213,15 +224,28 @@ export function parseEmployeeReceipts(lines: string[], logFn: (msg: string, type
     const uKey = stub.name.toUpperCase().trim();
     if (!consolidatedMap[uKey]) {
       consolidatedMap[uKey] = {
+        idHr: stub.idHr,
         name: stub.name,
         concepts: {},
-        liquido: 0
+        liquido: 0,
+        remCAporte: 0,
+        remSAporte: 0,
+        salarioFamiliar: 0,
+        totalDescuentos: 0
       };
       orderedKeys.push(uKey);
+    } else {
+      // If we got an idHr on a duplicate page and the previous was empty
+      if (!consolidatedMap[uKey].idHr && stub.idHr) {
+        consolidatedMap[uKey].idHr = stub.idHr;
+      }
     }
     
     const target = consolidatedMap[uKey];
     target.liquido += stub.liquido;
+    target.remCAporte += stub.remCAporte;
+    target.remSAporte += stub.remSAporte;
+    target.salarioFamiliar += stub.salarioFamiliar;
     
     for (const [ckey, concept] of Object.entries(stub.concepts)) {
       if (!target.concepts[ckey]) {
@@ -230,6 +254,18 @@ export function parseEmployeeReceipts(lines: string[], logFn: (msg: string, type
         target.concepts[ckey].value += concept.value;
       }
     }
+  }
+
+  // Calculate totalDescuentos for consolidated stubs
+  for (const key of orderedKeys) {
+    const target = consolidatedMap[key];
+    let sumRT = 0;
+    for (const concept of Object.values(target.concepts)) {
+      if (concept.type === 'RT') {
+        sumRT += concept.value;
+      }
+    }
+    target.totalDescuentos = sumRT;
   }
 
   return orderedKeys.map(k => consolidatedMap[k]);
@@ -243,7 +279,8 @@ let rowIdx = 0;
  */
 export function parseTotrep(lines: string[]): { totalsReported: Record<string, number>; reportedLiquido: number } {
   const totalsReported: Record<string, number> = {};
-  let reportedLiquido = 0;
+  let sumOfTotalsReparticion = 0;
+  let sumOfLiquidoAPagar = 0;
 
   for (const line of lines) {
     if (!line) continue;
@@ -279,14 +316,45 @@ export function parseTotrep(lines: string[]): { totalsReported: Record<string, n
       continue;
     }
 
+    // Check for "TOTALES POR REPARTICIÓN" or general totals line
+    const totalRepMatch = trimmed.match(/TOTALES\s+POR\s+REPARTICI[ÓO]N:?/i) || 
+                          trimmed.match(/TOTALES\s+GENERALES:?/i) ||
+                          trimmed.match(/TOTAL\s+GENERAL:?/i);
+    if (totalRepMatch) {
+      const numMatches = trimmed.match(/([\d\.]+,\d{2})/g);
+      if (numMatches && numMatches.length >= 3) {
+        // The 3rd value is the LIQUIDO (REMUNERACIONES, DESCUENTOS, LIQUIDO)
+        const val = es2f(numMatches[2]);
+        if (val > 0) {
+          sumOfTotalsReparticion += val;
+        }
+      } else if (numMatches && numMatches.length === 1) {
+        const val = es2f(numMatches[0]);
+        if (val > 0) {
+          sumOfTotalsReparticion += val;
+        }
+      }
+      continue;
+    }
+
     // Look for reported Net Pay (Lìquido a Pagar / Monto Total Liquido)
     const liqMatch = trimmed.match(/(?:Lìquido|Liquido)\s+a\s+Pagar:?\s*([\d\.]+,\d{2})/i) ||
                      trimmed.match(/Monto\s+Total\s+Liquido\s+por\s+Empresa:?\s*([\d\.]+,\d{2})/i) ||
                      trimmed.match(/Liquido\s+a\s+pagar:?\s*([\d\.]+,\d{2})/i);
     
     if (liqMatch) {
-      reportedLiquido = es2f(liqMatch[1]);
+      const val = es2f(liqMatch[1]);
+      if (val > 0) {
+        sumOfLiquidoAPagar += val;
+      }
     }
+  }
+
+  let reportedLiquido = 0;
+  if (sumOfTotalsReparticion > 0) {
+    reportedLiquido = sumOfTotalsReparticion;
+  } else if (sumOfLiquidoAPagar > 0) {
+    reportedLiquido = sumOfLiquidoAPagar;
   }
 
   return { totalsReported, reportedLiquido };
